@@ -14,6 +14,7 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <sys/sysmacros.h>
+#include <stdint.h>
 
 static void perror_msg_and_die2(const char* msg, const char *extra) {
 	if (extra) fprintf(stderr,"%s: ", extra);
@@ -31,14 +32,15 @@ static void error_msg_and_die(const char* msg) {
 }
 
 
-static int pwritef(const char * fn, const char *buf) {
-        int fd = open(fn, O_WRONLY);
+static int pwritef(const char * fn, const char *buf, int flags) {
+        int fd = open(fn, O_WRONLY | flags, 0600);
         if (fd < 0) return -1;
         if (write(fd, buf, strlen(buf)) != strlen(buf))
         	return -1;
         close(fd);
         return 0;
 }
+
 
 static void procwritef(const char * fn, const char *msg, ...) {
 	char buf[80];
@@ -48,9 +50,22 @@ static void procwritef(const char * fn, const char *msg, ...) {
 		error_msg_and_die("procwritef buf overflow");
 	}
         va_end(ap);
-        if (pwritef(fn, buf) != 0) perror_msg_and_die2("procwritef", fn);
+        if (pwritef(fn, buf, 0) != 0) perror_msg_and_die2("procwritef", fn);
 }
 
+static void writelinef(const char * fn, const char *msg, ...) {
+	char buf[80];
+        va_list ap;
+        va_start(ap, msg);
+	if (vsnprintf(buf,80,msg,ap) >= 80) {
+		error_msg_and_die("buf overflow");
+	}
+        va_end(ap);
+        if (pwritef(fn, buf, O_CREAT) != 0) perror_msg_and_die2("writelinef", fn);
+}
+
+
+#define PID1_FN ".pid1"
 
 int main(int argc, char **argv) {
 	if (argc < 3) {
@@ -112,15 +127,45 @@ int main(int argc, char **argv) {
 	if (chdir("/") != 0)
 		perror_msg_and_die("chdir(/)");
 
+	int initmode = 1; /* 0= the program is init, 1= we become init */
+
+	/* If program name ends in "/init", it is init (eg. /sbin/init, or /init are.) */
+	int a0l = strlen(argv[2]);
+	if (strcmp(argv[2]+(a0l-5),"/init")==0) initmode = 0;
+
+	int pifd[2];
+	if (initmode) if (pipe(pifd) != 0) perror_msg_and_die("pipe");
+
 	/* We need to f**k it to be in the new pid namespace. */
 	pid_t chld = fork();
 	if (chld == -1) perror_msg_and_die("fork");
 
 	if (chld) {
-		/* I suppose we need to wait for the child. */
-		wait(NULL);
+		/* Store the child pid for other entries into the "chroot". */
+		writelinef(PID1_FN, "%d", chld);
+
+		if (initmode) {
+			/* We quit when the program launched by init quits. */
+			/* If the program laucnches daemons or other programs
+			 * join the namespace in the meantime, the init gets
+			 * left behind to take care of them, and quits when
+			 * there are no more processes to wait() for. */
+			int r;
+			uint8_t dummy[1];
+			close(pifd[1]);
+			do {
+				r = read(pifd[0], dummy, 1);
+				if ((r==-1)&&(errno==EINTR)) continue;
+			} while (0);
+		} else {
+			/* I suppose we need to wait for the child. */
+			wait(NULL);
+			/* Child is gone, remove pidfile. */
+			unlink(PID1_FN);
+		}
 		exit(0);
 	}
+	if (initmode) close(pifd[0]);
 
 	/* We are basically in the environment we need, on the rest
 	 * of things just report errors instead of aborting on error */
@@ -150,6 +195,35 @@ int main(int argc, char **argv) {
 
 	if (sethostname(hn, strlen(hn)) != 0)
 		perror("sethostname");
+
+	if (initmode) {
+		/* We need to become init for the program we are about to run,
+		 * and any others that join the namespace later. */
+		pid_t prog = fork();
+		if (prog == -1) perror_msg_and_die("fork");
+		if (prog) {
+			/* We are init. */
+			do {
+				int r = wait(NULL);
+				if (r == -1) {
+					if (errno==EINTR) continue;
+					/* Else assume we should bail out. */
+					unlink(PID1_FN);
+					exit(0);
+				}
+				if (r == prog) {
+					uint8_t d[1] = { 0 };
+					/* Report that the program quit to our parent. */
+					do {
+						int x = write(pifd[1], d, 1);
+						if ((x == 0)||((x == -1)&&(errno == EINTR))) continue;
+					} while(0);
+					prog = -1;
+				}
+			} while(1);
+		}
+		close(pifd[1]); /* Dont leak the pipe write fd to the program. */
+	}
 
 	/* We make a new environment just to be nice (and to add *sbin). */
 	char *termp = getenv("TERM");
