@@ -15,6 +15,8 @@
 #include <sys/wait.h>
 #include <sys/sysmacros.h>
 #include <stdint.h>
+#include <dirent.h>
+
 
 static void perror_msg_and_die2(const char* msg, const char *extra) {
 	if (extra) fprintf(stderr,"%s: ", extra);
@@ -64,6 +66,74 @@ static void writelinef(const char * fn, const char *msg, ...) {
         if (pwritef(fn, buf, O_CREAT) != 0) perror_msg_and_die2("writelinef", fn);
 }
 
+static void run_prog(char **argv) {
+	/* We make a new environment just to be nice (and to add *sbin). */
+	char *termp = getenv("TERM");
+	if (termp) termp -= strlen("TERM=");
+	char * const env[] = { "PATH=/bin:/sbin:/usr/bin:/usr/sbin", termp, NULL };
+
+	execvpe(argv[0], argv, env);
+	perror_msg_and_die("execvp");
+}
+
+static int ns_enter(int pid, char **argv) {
+	/* Enter the namespaces identified by the pid
+	 * and run the program specified in argv. */
+	const char * spaces[] = {
+		"/proc/%d/ns/user",
+		"/proc/%d/ns/uts",
+		"/proc/%d/ns/pid",
+		"/proc/%d/ns/mnt"
+	};
+	char buf[6+10+4+4+1];
+	int s = 1;
+	/* If we're non-root, enter the user namespace first. */
+	if (getuid()) s = 0;
+
+	for (;s<4;s++) {
+		sprintf(buf,spaces[s],pid);
+		int fd = open(buf, O_RDONLY);
+		if (setns(fd, 0) != 0)
+			perror_msg_and_die2("setns", buf);
+		close(fd);
+	}
+
+	if (chdir("/") != 0)
+		perror_msg_and_die("chdir(/)");
+
+	/* To enter the pid namespace, do a fork(). */
+	int chld = fork();
+	if (chld == -1) perror_msg_and_die("fork");
+	if (chld) {
+		/* Wait for the child.. */
+		wait(NULL);
+		exit(0);
+	}
+
+	/* Here we gooooo... */
+	run_prog(argv);
+	return 1;
+}
+
+
+static int proc_list_pids(DIR **proc) {
+	if (!(*proc)) {
+		*proc = opendir("/proc");
+	}
+	if (!(*proc)) return 0;
+	struct dirent *d;
+	while ((d = readdir(*proc))) {
+		char *e;
+		errno = 0;
+		long int pid = strtol(d->d_name,&e,10);
+		if (errno) continue;
+		if (*e != 0) continue;
+		return pid;
+	}
+	closedir(*proc);
+	*proc = NULL;
+	return 0;
+}
 
 #define PID1_FN ".pid1"
 
@@ -78,6 +148,39 @@ int main(int argc, char **argv) {
 
 	if (chdir(argv[1]) != 0)
 		perror_msg_and_die("chdir(dir)");
+
+	/* Check for a .pid1 file in the chroot. */
+	int p1fd = open(PID1_FN, O_RDONLY);
+	if (p1fd>=0) {
+		char buf[6+10+4+1]; /* Enough for /proc/N/cwd */
+		/* Validate pid in file... */
+		int l = 0;
+		do {
+			int r = read(p1fd, buf+l, 16-l);
+			if ((r==-1)&&(errno==EINTR)) continue;
+			if (r<=0) break;
+			l += r;
+		} while (1);
+		if (l==16) l = 0;
+		close(p1fd);
+		if (l) {
+			buf[l] = 0;
+			int pid = atoi(buf);
+			if (pid<=0) pid = 0;
+			if (pid) {
+				/* Validate that it is an existing process and has cwd at root... */
+				sprintf(buf,"/proc/%d/cwd",pid);
+				char *p = realpath(buf, NULL);
+				if ((p)&&(strcmp(p,"/")==0)) {
+					free(p);
+					return ns_enter(pid, argv+2);
+				}
+				free(p);
+			}
+		}
+		unlink(PID1_FN);
+		fprintf(stderr, "Removed stale " PID1_FN " file\n");
+	}
 
 	/* Figuring out the full path and default hostname for the container. */
 	const char * path = realpath(".", NULL);
@@ -146,10 +249,10 @@ int main(int argc, char **argv) {
 
 		if (initmode) {
 			/* We quit when the program launched by init quits. */
-			/* If the program laucnches daemons or other programs
+			/* If the program launches daemons or other programs
 			 * join the namespace in the meantime, the init gets
 			 * left behind to take care of them, and quits when
-			 * there are no more processes to wait() for. */
+			 * there are no more processes in the namespace. */
 			int r;
 			uint8_t dummy[1];
 			close(pifd[1]);
@@ -201,35 +304,40 @@ int main(int argc, char **argv) {
 		 * and any others that join the namespace later. */
 		pid_t prog = fork();
 		if (prog == -1) perror_msg_and_die("fork");
-		if (prog) {
-			/* We are init. */
-			do {
-				int r = wait(NULL);
-				if (r == -1) {
-					if (errno==EINTR) continue;
-					/* Else assume we should bail out. */
-					unlink(PID1_FN);
-					exit(0);
+		if (prog) do { /* We are init. */
+			int r = wait(NULL);
+			if (r == -1) {
+				if (errno==EINTR) continue;
+				if (errno==ECHILD) {
+					/* Check a bit more thorougly. */
+					DIR *d = NULL;
+					int p;
+					while((p = proc_list_pids(&d))) {
+						if (p>1) break;
+					}
+					if (d) closedir(d);
+					if (p > 1) {
+						/* Found someone. */
+						sleep(3); /* Snooze */
+						continue;
+					}
 				}
-				if (r == prog) {
-					uint8_t d[1] = { 0 };
-					/* Report that the program quit to our parent. */
-					do {
-						int x = write(pifd[1], d, 1);
-						if ((x == 0)||((x == -1)&&(errno == EINTR))) continue;
-					} while(0);
-					prog = -1;
-				}
-			} while(1);
-		}
+				/* Else assume we should bail out. */
+				unlink(PID1_FN);
+				exit(0);
+			}
+			if (r == prog) {
+				uint8_t d[1] = { 0 };
+				/* Report that the program quit to our parent. */
+				do {
+					int x = write(pifd[1], d, 1);
+					if ((x == 0)||((x == -1)&&(errno == EINTR))) continue;
+				} while(0);
+				prog = -1;
+			}
+		} while(1);
 		close(pifd[1]); /* Dont leak the pipe write fd to the program. */
 	}
 
-	/* We make a new environment just to be nice (and to add *sbin). */
-	char *termp = getenv("TERM");
-	if (termp) termp -= strlen("TERM=");
-	char * const env[] = { "PATH=/bin:/sbin:/usr/bin:/usr/sbin", termp, NULL };
-
-	execvpe(argv[2], argv+2, env);
-	perror_msg_and_die("execvp");
+	run_prog(argv+2);
 }
