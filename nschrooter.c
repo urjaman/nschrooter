@@ -73,12 +73,17 @@ int main(int argc, char **argv) {
 	}
 	if (!hn) hn = "(container)";
 
-	if (unshare(CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUSER | CLONE_NEWUTS) != 0)
+	/* Only do user namespaces if we have to. */
+	int more_flags = muid ? CLONE_NEWUSER : 0;
+
+	if (unshare(CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | more_flags) != 0)
 		perror_msg_and_die("unshare");
 
-	procwritef("/proc/self/setgroups", "deny");
-	procwritef("/proc/self/uid_map", "0 %d 1", muid);
-	procwritef("/proc/self/gid_map", "0 %d 1", mgid);
+	if (muid) {
+		procwritef("/proc/self/setgroups", "deny");
+		procwritef("/proc/self/uid_map", "0 %d 1", muid);
+		procwritef("/proc/self/gid_map", "0 %d 1", mgid);
+	}
 
 	/* slave mount */
 	if (mount(NULL, "/", NULL, MS_REC|MS_PRIVATE, NULL) != 0)
@@ -93,7 +98,7 @@ int main(int argc, char **argv) {
 		perror_msg_and_die("chdir(path)");
 
 	/* Make the old rootfs visible. We need them later, and as an user we cant unmount them either.  */
-	(void) mkdir("oldroot", 0777);
+	(void) mkdir("oldroot", 0755);
 
 	if (mount("/", "./oldroot", NULL, MS_BIND|MS_REC, NULL) != 0)
 		perror("oldroot move");
@@ -127,15 +132,26 @@ int main(int argc, char **argv) {
 	unlink("dev"); rmdir("dev");
 	unlink("sys"); rmdir("sys");
 
-	if (symlink("/oldroot/dev", "dev") != 0)
-		perror("dev symlink");
-
-	if (symlink("/oldroot/sys", "sys") != 0)
-		perror("sys symlink");
+	if (muid) {
+		/* User mode, /dev and /sys symlinks. */
+		if (symlink("/oldroot/dev", "dev") != 0) perror("dev symlink");
+		if (symlink("/oldroot/sys", "sys") != 0) perror("sys symlink");
+	} else {
+		/* Superuser mode, bind mounts. */
+		mkdir("dev", 0755);
+		mkdir("sys", 0755);
+		if (mount("/oldroot/dev", "dev", NULL, MS_BIND, NULL) != 0)
+			perror("mount /dev");
+		if (mount("/oldroot/dev/pts", "dev/pts", NULL, MS_BIND, NULL) != 0)
+			perror("mount /dev/pts");
+		if (mount("/oldroot/sys", "sys", NULL, MS_BIND, NULL) != 0)
+			perror("mount /sys");
+	}
 
 	if (sethostname(hn, strlen(hn)) != 0)
 		perror("sethostname");
 
+	/* We make a new environment just to be nice (and to add *sbin). */
 	char *termp = getenv("TERM");
 	if (termp) termp -= strlen("TERM=");
 	char * const env[] = { "PATH=/bin:/sbin:/usr/bin:/usr/sbin", termp, NULL };
