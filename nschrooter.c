@@ -276,7 +276,7 @@ int main(int argc, char **argv) {
 	if (mount("proc", "/proc", "proc", 0, NULL) != 0)
 		perror("mount /proc");
 
-
+	/* These will fail if /dev and/or sys are correct already. */
 	unlink("dev"); rmdir("dev");
 	unlink("sys"); rmdir("sys");
 
@@ -288,12 +288,22 @@ int main(int argc, char **argv) {
 		/* Superuser mode, bind mounts. */
 		mkdir("dev", 0755);
 		mkdir("sys", 0755);
-		if (mount("/oldroot/dev", "dev", NULL, MS_BIND, NULL) != 0)
-			perror("mount /dev");
-		if (mount("/oldroot/dev/pts", "dev/pts", NULL, MS_BIND, NULL) != 0)
-			perror("mount /dev/pts");
-		if (mount("/oldroot/sys", "sys", NULL, MS_BIND, NULL) != 0)
-			perror("mount /sys");
+		int dfd = open("/dev/zero", O_RDONLY);
+		DIR *syschk = opendir("/sys/dev");
+		if (dfd < 0) {
+			if (mount("/oldroot/dev", "dev", NULL, MS_BIND, NULL) != 0)
+				perror("mount /dev");
+			if (mount("/oldroot/dev/pts", "dev/pts", NULL, MS_BIND, NULL) != 0)
+				perror("mount /dev/pts");
+		} else {
+			close(dfd);
+		}
+		if (!syschk) {
+			if (mount("/oldroot/sys", "sys", NULL, MS_BIND, NULL) != 0)
+				perror("mount /sys");
+		} else {
+			closedir(syschk);
+		}
 	}
 
 	if (sethostname(hn, strlen(hn)) != 0)
