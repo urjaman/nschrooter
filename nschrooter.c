@@ -73,10 +73,19 @@ static void run_prog(char **argv) {
 	char * const env[] = { "PATH=/bin:/sbin:/usr/bin:/usr/sbin", termp, NULL };
 
 	execvpe(argv[0], argv, env);
-	perror_msg_and_die("execvp");
+	perror("execvpe");
+	exit(127); /* Specific code for failure to run command. */
 }
 
-static int ns_enter(int pid, char **argv) {
+/* Generate a return value from a wait() status variable. */
+static uint8_t wait_retval(int status) {
+	if (WIFEXITED(status)) return WEXITSTATUS(status);
+	if (WIFSIGNALED(status)) return WTERMSIG(status)+128;
+	/* Umm, well it likely wasnt succesful... arbitrary pick. */
+	return 255;
+}
+
+static void ns_enter(int pid, char **argv) {
 	/* Enter the namespaces identified by the pid
 	 * and run the program specified in argv. */
 	const char * spaces[] = {
@@ -106,13 +115,13 @@ static int ns_enter(int pid, char **argv) {
 	if (chld == -1) perror_msg_and_die("fork");
 	if (chld) {
 		/* Wait for the child.. */
-		wait(NULL);
-		exit(0);
+		int s;
+		wait(&s);
+		exit(wait_retval(s));
 	}
 
 	/* Here we gooooo... */
 	run_prog(argv);
-	return 1;
 }
 
 
@@ -173,7 +182,8 @@ int main(int argc, char **argv) {
 				char *p = realpath(buf, NULL);
 				if ((p)&&(strcmp(p,"/")==0)) {
 					free(p);
-					return ns_enter(pid, argv+2);
+					ns_enter(pid, argv+2);
+					/* does not return */
 				}
 				free(p);
 			}
@@ -246,6 +256,7 @@ int main(int argc, char **argv) {
 	if (chld) {
 		/* Store the child pid for other entries into the "chroot". */
 		writelinef(PID1_FN, "%d", chld);
+		uint8_t retval[1] = { 0 };
 
 		if (initmode) {
 			/* We quit when the program launched by init quits. */
@@ -254,19 +265,21 @@ int main(int argc, char **argv) {
 			 * left behind to take care of them, and quits when
 			 * there are no more processes in the namespace. */
 			int r;
-			uint8_t dummy[1];
 			close(pifd[1]);
 			do {
-				r = read(pifd[0], dummy, 1);
+				r = read(pifd[0], retval, 1);
 				if ((r==-1)&&(errno==EINTR)) continue;
 			} while (0);
 		} else {
+			int s;
 			/* I suppose we need to wait for the child. */
-			wait(NULL);
+			wait(&s);
+			retval[0] = wait_retval(s);
 			/* Child is gone, remove pidfile. */
 			unlink(PID1_FN);
+
 		}
-		exit(0);
+		exit(retval[0]);
 	}
 	if (initmode) close(pifd[0]);
 
@@ -315,7 +328,8 @@ int main(int argc, char **argv) {
 		pid_t prog = fork();
 		if (prog == -1) perror_msg_and_die("fork");
 		if (prog) do { /* We are init. */
-			int r = wait(NULL);
+			int s;
+			int r = wait(&s);
 			if (r == -1) {
 				if (errno==EINTR) continue;
 				if (errno==ECHILD) {
@@ -337,10 +351,10 @@ int main(int argc, char **argv) {
 				exit(0);
 			}
 			if (r == prog) {
-				uint8_t d[1] = { 0 };
+				uint8_t retval[1] = { wait_retval(s) };
 				/* Report that the program quit to our parent. */
 				do {
-					int x = write(pifd[1], d, 1);
+					int x = write(pifd[1], retval, 1);
 					if ((x == 0)||((x == -1)&&(errno == EINTR))) continue;
 				} while(0);
 				prog = -1;
