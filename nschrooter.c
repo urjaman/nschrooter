@@ -66,14 +66,31 @@ static void writelinef(const char * fn, const char *msg, ...) {
         if (pwritef(fn, buf, O_CREAT) != 0) perror_msg_and_die2("writelinef", fn);
 }
 
-static void run_prog(char **argv) {
-	/* We make a new environment just to be nice (and to add *sbin). */
-	char *termp = getenv("TERM");
-	if (termp) termp -= strlen("TERM=");
-	char * const env[] = { "PATH=/bin:/sbin:/usr/bin:/usr/sbin", termp, NULL };
+/* Make new malloc() string c = a + b */
+static char* strdcat(const char *a, const char *b) {
+	size_t la = strlen(a);
+	char* c = malloc(la+strlen(b));
+	if (!c) perror_msg_and_die("malloc");
+	memcpy(c,a,la);
+	strcpy(c+la,b);
+	return c;
+}
 
-	execvpe(argv[0], argv, env);
-	perror("execvpe");
+static int clean_env = 0;
+
+static void run_prog(char **argv) {
+	if (clean_env) {
+		/* We make a new environment just to be nice (and to add *sbin). */
+		char *termp = getenv("TERM");
+		if (termp) termp -= strlen("TERM=");
+		char * const env[] = { "PATH=/bin:/sbin:/usr/bin:/usr/sbin", termp, NULL };
+
+		execvpe(argv[0], argv, env);
+		perror("execvpe");
+	} else {
+		execvp(argv[0], argv);
+		perror("execvp");
+	}
 	exit(127); /* Specific code for failure to run command. */
 }
 
@@ -144,18 +161,137 @@ static int proc_list_pids(DIR **proc) {
 	return 0;
 }
 
+static char *pfdreader(int fd, int *l) {
+	int ml = 1;
+	char *buf = NULL;
+	int o = 0;
+	do {
+		if ((ml-o-1) < 2048) {
+			ml += 4096;
+			buf = realloc(buf, ml);
+			if (!buf) perror_msg_and_die("(re)alloc");
+		}
+		int r = read(fd, buf+o, ml-o-1);
+		if ((r==-1)&&(errno==EINTR)) continue;
+		if (r<=0) break;
+		o += r;
+	} while (1);
+	buf[o] = 0;
+	if (l) *l = o;
+	return buf;
+}
+
+static char * pmountsreader(void) {
+	int fd = open("/proc/self/mounts", O_RDONLY);
+	if (fd < 0) return NULL;
+	char * d = pfdreader(fd, NULL);
+	close(fd);
+	return d;
+}
+
+static void umountizer(const char *prefix) {
+	int plen = strlen(prefix);
+	/* Unmount everything. */
+	int umounted;
+	int failed;
+	do {
+		char * mounts = pmountsreader();
+		umounted = 0;
+		failed = 0;
+		char * pp = mounts;
+		char * nl;
+		do {
+			/* Find the next line beforehand, because we edit part of line in-place. */
+			if (!pp) break;
+			nl = strchr(pp, '\n');
+			if (nl) nl++;
+
+			/* Find the mount path (between the first two spaces on the line) */
+			char *ns1 = strchr(pp, ' ');
+			if (!ns1) break;
+			ns1++;
+			char *ns2 = strchr(ns1, ' ');
+			if (!ns2) break;
+
+			/* In-place convert out octal escapes from the path and make it into a C-string. */
+			int l = ns2 - ns1;
+			int wi = 0;
+			for (int i=0;i<l;i++) {
+				if (ns1[i] == '\\') {
+					ns1[wi++] = ((ns1[i+1] << 6) & 0300) | ((ns1[i+2] << 3) & 0070) | (ns1[i+3] & 0007);
+					i += 3; /* skip the octal value */
+					continue;
+				}
+				ns1[wi++] = ns1[i];
+			}
+			ns1[wi] = 0;
+			int mlen = plen;
+			if (mlen > wi) mlen = wi;
+
+			/* If the result doesnt match prefix, try unmounting it */
+			if ((strncmp(prefix, ns1, mlen) != 0)) {
+				if (umount2(ns1, MNT_DETACH) == 0) umounted++;
+				else failed++;
+			}
+		} while ((pp = nl));
+		free(mounts);
+		/* If all success = stop, if all fails = stop, if nothing to do = stop, else go try again. */
+	} while (umounted && failed);
+}
+
 #define PID1_FN ".pid1"
 
+void usage(char *name) {
+	fprintf(stderr,"usage: %s [options] dir program [parameters]\n"
+		"\n\tOptions:"
+		"\n\t-i\tProvide init (default unless program ends /init)"
+		"\n\t-b\tBoot system (dont provide init)"
+		"\n\t-k\tKill previous instance (force new namespace)"
+		"\n\t-E\tEnter previous namespace (dont make new ns)"
+		"\n\t-A\tMount/Provide /proc,/dev and /sys for you (default if user)"
+		"\n\t-N\tDont mount /proc,/dev,/sys (default if root)"
+		"\n\t-c\tCleanup environment (only passes TERM and a clean PATH)"
+		"\n\t-M hn\tSet hostname (default=directory name)"
+		"\n\t-r path\tMount old root at path (default if user=oldroot,if root none)"
+	"\n\n",name);
+	exit(1);
+}
+
 int main(int argc, char **argv) {
-	if (argc < 3) {
-		fprintf(stderr,"usage: $0 dir program [parameters]\n");
-		exit(1);
+	int entermode = 2; /* 0= Force new ns, 1= Force enter old ns, 2= automatic (enter old if exists) */
+	int initmode = 2; /* 0= the program is init, 1= we become init, 2= automatic (0 if prog ends /init)  */
+	int automounts = 2; /* 0= no helpful mounts, 1= do helpful mounts, 2= automatic (only if user) */
+	char *hn = NULL; /* Hostname */
+	char *old_root = NULL;
+	int opt;
+
+	while ((opt = getopt(argc, argv, "+ibkEANcM:r:")) != -1) {
+		switch (opt) {
+			default: usage(argv[0]); break;
+			case 'i': initmode = 1; break; /* -i = nschrooter provides ns pid 1 (Init) */
+			case 'b': initmode = 0; break; /* -b = Boot a system, program is init */
+			case 'k': entermode = 0; break; /* Force new namespace, Kill previous init */
+			case 'E': entermode = 1; break; /* Enter old namespaces, dont try making new. */
+			case 'A': automounts = 1; break; /* Help with /proc,/sys,/dev */
+			case 'N': automounts = 0; break; /* No help with ^^ */
+			case 'c': clean_env = 1; break; /* Cleanup environment */
+			case 'M': hn = optarg; break; /* Setting hostname with the -M flag */
+			case 'r': old_root = optarg; break; /* Path to old root */
+		}
 	}
+
+	if ((argc - optind) < 2) usage(argv[0]);
 
 	int muid = getuid();
 	int mgid = getgid();
 
-	if (chdir(argv[1]) != 0)
+	/* Automatic means we only automount if user */
+	if (automounts == 2) automounts = muid ? 1 : 0;
+
+	/* In user mode enable old_root always. */
+	if ((!old_root)&&(muid)) old_root = "oldroot";
+
+	if (chdir(argv[optind]) != 0)
 		perror_msg_and_die("chdir(dir)");
 
 	/* Check for a .pid1 file in the chroot. */
@@ -182,24 +318,35 @@ int main(int argc, char **argv) {
 				char *p = realpath(buf, NULL);
 				if ((p)&&(strcmp(p,"/")==0)) {
 					free(p);
-					ns_enter(pid, argv+2);
-					/* does not return */
+					if (entermode) {
+						ns_enter(pid, argv+optind+1);
+					} else {
+						kill(pid, SIGKILL);
+						fprintf(stderr, "Killed previous pid 1 (%d)\n", pid);
+					}
+					/* ns_enter does not return */
+				} else {
+					free(p);
 				}
-				free(p);
 			}
 		}
 		unlink(PID1_FN);
-		fprintf(stderr, "Removed stale " PID1_FN " file\n");
+		if (entermode) fprintf(stderr, "Removed stale " PID1_FN " file\n");
+		if (entermode==1) {
+			fprintf(stderr, "Cannot enter (-E) old namespace\n");
+			exit(1);
+		}
 	}
 
 	/* Figuring out the full path and default hostname for the container. */
 	const char * path = realpath(".", NULL);
-	const char * hn = NULL;
-	if (path) {
+	if (!path) perror_msg_and_die("realpath");
+
+	if (!hn) {
 		hn = strrchr(path, '/');
 		if (hn) hn = hn+1;
+		if (!hn) hn = "(container)";
 	}
-	if (!hn) hn = "(container)";
 
 	/* Only do user namespaces if we have to. */
 	int more_flags = muid ? CLONE_NEWUSER : 0;
@@ -225,11 +372,39 @@ int main(int argc, char **argv) {
 	if (chdir(path) != 0)
 		perror_msg_and_die("chdir(path)");
 
-	/* Make the old rootfs visible. We need them later, and as an user we cant unmount them either.  */
-	(void) mkdir("oldroot", 0755);
+	if (automounts) { /* for /dev and /sys */
+		/* These will fail if /dev and/or sys are correct already. */
+		unlink("dev"); rmdir("dev");
+		unlink("sys"); rmdir("sys");
 
-	if (mount("/", "./oldroot", NULL, MS_BIND|MS_REC, NULL) != 0)
-		perror("oldroot move");
+		if (muid) {
+			/* User mode, /dev and /sys symlinks. */
+			char *ds = strdcat(old_root,"/dev");
+			char *ss = strdcat(old_root,"/sys");
+			if (symlink(ds, "dev") != 0) perror("dev symlink");
+			if (symlink(ss, "sys") != 0) perror("sys symlink");
+			free(ds);
+			free(ss);
+		} else {
+			/* Superuser mode, bind mounts. */
+			mkdir("dev", 0755);
+			mkdir("sys", 0755);
+			if (mount("/dev", "dev", NULL, MS_BIND|MS_REC, NULL) != 0)
+				perror("mount /dev");
+			if (mount("/sys", "sys", NULL, MS_BIND, NULL) != 0)
+				perror("mount /sys");
+		}
+	}
+
+	if (old_root) {
+		/* Make the old rootfs visible. We need them later, and as an user we cant unmount them either.  */
+		(void) mkdir(old_root, 0755);
+
+		if (mount("/", old_root, NULL, MS_BIND|MS_REC, NULL) != 0)
+			perror("oldroot move");
+	}
+
+	umountizer(path);
 
 	if (mount(path, "/", NULL, MS_MOVE, NULL) != 0)
 		perror_msg_and_die("move mount");
@@ -240,11 +415,12 @@ int main(int argc, char **argv) {
 	if (chdir("/") != 0)
 		perror_msg_and_die("chdir(/)");
 
-	int initmode = 1; /* 0= the program is init, 1= we become init */
 
-	/* If program name ends in "/init", it is init (eg. /sbin/init, or /init are.) */
-	int a0l = strlen(argv[2]);
-	if (strcmp(argv[2]+(a0l-5),"/init")==0) initmode = 0;
+	if (initmode == 2) { /* Automatic mode */
+		/* If program name ends in "/init", it is init (eg. /sbin/init, or /init are.) */
+		int a0l = strlen(argv[2]);
+		if (strcmp(argv[2]+(a0l-5),"/init")==0) initmode = 0;
+	}
 
 	int pifd[2];
 	if (initmode) if (pipe(pifd) != 0) perror_msg_and_die("pipe");
@@ -286,37 +462,11 @@ int main(int argc, char **argv) {
 	/* We are basically in the environment we need, on the rest
 	 * of things just report errors instead of aborting on error */
 
-	if (mount("proc", "/proc", "proc", 0, NULL) != 0)
-		perror("mount /proc");
+	if (automounts) { /* for /proc, since needs to be in new pid ns. */
+		(void) mkdir("proc", 0755);
+		if (mount("proc", "/proc", "proc", 0, NULL) != 0)
+			perror("mount /proc");
 
-	/* These will fail if /dev and/or sys are correct already. */
-	unlink("dev"); rmdir("dev");
-	unlink("sys"); rmdir("sys");
-
-	if (muid) {
-		/* User mode, /dev and /sys symlinks. */
-		if (symlink("/oldroot/dev", "dev") != 0) perror("dev symlink");
-		if (symlink("/oldroot/sys", "sys") != 0) perror("sys symlink");
-	} else {
-		/* Superuser mode, bind mounts. */
-		mkdir("dev", 0755);
-		mkdir("sys", 0755);
-		int dfd = open("/dev/zero", O_RDONLY);
-		DIR *syschk = opendir("/sys/dev");
-		if (dfd < 0) {
-			if (mount("/oldroot/dev", "dev", NULL, MS_BIND, NULL) != 0)
-				perror("mount /dev");
-			if (mount("/oldroot/dev/pts", "dev/pts", NULL, MS_BIND, NULL) != 0)
-				perror("mount /dev/pts");
-		} else {
-			close(dfd);
-		}
-		if (!syschk) {
-			if (mount("/oldroot/sys", "sys", NULL, MS_BIND, NULL) != 0)
-				perror("mount /sys");
-		} else {
-			closedir(syschk);
-		}
 	}
 
 	if (sethostname(hn, strlen(hn)) != 0)
@@ -363,5 +513,5 @@ int main(int argc, char **argv) {
 		close(pifd[1]); /* Dont leak the pipe write fd to the program. */
 	}
 
-	run_prog(argv+2);
+	run_prog(argv+optind+1);
 }
