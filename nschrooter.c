@@ -253,6 +253,7 @@ void usage(char *name) {
 		"\n\t-c\tCleanup environment (only passes TERM and a clean PATH)"
 		"\n\t-M hn\tSet hostname (default=directory name)"
 		"\n\t-r path\tMount old root at path (default if user=oldroot,if root none)"
+		"\n\t-t sec\tExit timeout in an empty namespace (default 5, -1 = forever)"
 	"\n\n",name);
 	exit(1);
 }
@@ -264,8 +265,9 @@ int main(int argc, char **argv) {
 	char *hn = NULL; /* Hostname */
 	char *old_root = NULL;
 	int opt;
+	int init_timeout = 5;
 
-	while ((opt = getopt(argc, argv, "+ibkEANcM:r:")) != -1) {
+	while ((opt = getopt(argc, argv, "+ibkEANcM:r:t:")) != -1) {
 		switch (opt) {
 			default: usage(argv[0]); break;
 			case 'i': initmode = 1; break; /* -i = nschrooter provides ns pid 1 (Init) */
@@ -277,6 +279,7 @@ int main(int argc, char **argv) {
 			case 'c': clean_env = 1; break; /* Cleanup environment */
 			case 'M': hn = optarg; break; /* Setting hostname with the -M flag */
 			case 'r': old_root = optarg; break; /* Path to old root */
+			case 't': init_timeout = atoi(optarg); break; /* Timeout for exiting as init in an empty ns. */
 		}
 	}
 
@@ -475,6 +478,7 @@ int main(int argc, char **argv) {
 	if (initmode) {
 		/* We need to become init for the program we are about to run,
 		 * and any others that join the namespace later. */
+		int timeout = 0;
 		pid_t prog = fork();
 		if (prog == -1) perror_msg_and_die("fork");
 		if (prog) do { /* We are init. */
@@ -483,6 +487,11 @@ int main(int argc, char **argv) {
 			if (r == -1) {
 				if (errno==EINTR) continue;
 				if (errno==ECHILD) {
+					if (init_timeout < 0) {
+						/* -1 = Forever */
+						sleep(30);
+						continue;
+					}
 					/* Check a bit more thorougly. */
 					DIR *d = NULL;
 					int p;
@@ -492,7 +501,13 @@ int main(int argc, char **argv) {
 					if (d) closedir(d);
 					if (p > 1) {
 						/* Found someone. */
+						timeout = 0;
 						sleep(3); /* Snooze */
+						continue;
+					}
+					if ((++timeout) <= init_timeout) {
+						/* Give it a moment */
+						sleep(1);
 						continue;
 					}
 				}
