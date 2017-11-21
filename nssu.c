@@ -14,7 +14,6 @@
 #include <stdint.h>
 #include <pwd.h>
 
-
 static void perror_msg_and_die2(const char* msg, const char *extra) {
 	if (extra) fprintf(stderr,"%s: ", extra);
 	perror(msg);
@@ -66,7 +65,14 @@ void msetenv(const char *name, const char *value) {
 }
 
 void usage(char *name) {
-	fprintf(stderr, "Usage: %s stuff\n", name);
+	fprintf(stderr, "Usage: %s [-mpl] [-] [-s shell] [user] [-c CMD] [ARGS]"
+		"\n\n"
+		"Change apparent identity to that of user (by default, root) and run shell\n"
+		"\n\t-,-l\tClear environment, go to home, run shell as login shell"
+		"\n\t-p,-m\tDo not set new $HOME, $SHELL, $USER, $LOGNAME"
+		"\n\t-c CMD\tCommand to pass to 'sh -c'"
+		"\n\t-s SH\tShell to use"
+	"\n", name);
 	exit(1);
 }
 
