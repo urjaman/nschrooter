@@ -73,9 +73,9 @@ void usage(char *name) {
 int main(int argc, char **argv) {
 	int login = 0;
 	int env_preserve = 0;
-	const char * shell = NULL;
-	const char * user = NULL;
-	const char * cmd = NULL;
+	char * shell = NULL;
+	char * user = NULL;
+	char * cmd = NULL;
 
 	int muid = getuid();
 	int mgid = getgid();
@@ -112,7 +112,7 @@ int main(int argc, char **argv) {
 	if (!user) user = "root"; /* Future doesnt need to know */
 
 	const char *home = "/root";
-	const char *pw_shell = "/bin/sh";
+	char *pw_shell = "/bin/sh";
 
 	if (pw) {
 		tuid = pw->pw_uid;
@@ -146,7 +146,8 @@ int main(int argc, char **argv) {
 		const char* term = getenv("TERM");
 		if (chdir(home) != 0) {
 			perror("chdir");
-			chdir("/");
+			fprintf(stderr,"Instead you'll be at /");
+			if (chdir("/") != 0) perror("chdir");
 		}
 		clearenv();
 		if (term) msetenv("TERM", term);
@@ -169,7 +170,7 @@ int main(int argc, char **argv) {
 		argv[--optind] = "-c";
 	}
 
-	const char *arg0 = strrchr(shell, '/');
+	char *arg0 = strrchr(shell, '/');
 	if (arg0) arg0++;
 	if (!arg0) arg0 = shell;
 	if (login) arg0 = strdcat("-", arg0);
