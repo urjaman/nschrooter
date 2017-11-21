@@ -1,5 +1,28 @@
-nschrooter
----------
+nschrooter and folks
+--------------------
 
 My experiments on an user-runnable namespace-based chroot-like thing
 
+nschrooter can be used by root as a chroot-replacement,
+or by an user (with a suitable host system that has user namespaces)
+as an unprivileged chroot helper. It does rather little to contain
+the resulting entity (even less than eg. systemd-nspawn), so 
+just be aware.
+
+
+nssu
+----
+nssu ("namespace su") is a su-replacement for use in an unprivileged
+chroot. It doesnt change your real identity, but changes
+your apparent user and group IDs using a new user namespace, so
+you can "become" whoever you want in your unprivileged chroot.
+
+Of course all the files owned by you will still be owned
+by this user ID, etc, so it provides no filesystem isolation,
+but the point is to make it possible to appear to be a non-root
+user when building things (and "root" when installing) or
+when just running stuff...
+
+
+(oh, pidsearch is just a little thing I wrote to pgrep the
+ host procfs ... was useful when testing things in crouton)
