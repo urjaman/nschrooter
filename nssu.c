@@ -138,7 +138,8 @@ int main(int argc, char **argv) {
 		/* Check that we _cannot_ setuid() to target. If we can, we have
 		 * too much actual power ;) */
 		int r = setuid(tuid);
-		if ((r==0)||((r==-1)&&(errno==EAGAIN))) error_msg_and_die("Do not use nssu while actually root");
+		if ( ((r==0)&&(getuid()==tuid)) || ((r==-1)&&(errno==EAGAIN)) )
+			error_msg_and_die("Do not use nssu while actually root");
 
 		if (unshare(CLONE_NEWUSER) != 0)
 			perror_msg_and_die("unshare");
