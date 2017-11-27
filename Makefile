@@ -1,13 +1,21 @@
+CC = gcc
+CFLAGS ?= -Os -Wall
+
 all: nschrooter pidsearch nssu
 
+
 nschrooter: nschrooter.c
-	gcc -Os -Wall -static -o nschrooter nschrooter.c `pkg-config --static --libs libseccomp`
+	$(CC) $(CFLAGS) -o nschrooter nschrooter.c `pkg-config --libs libseccomp`
+
+nschrooter.static: nschrooter.c
+	$(CC) $(CFLAGS) -static -o nschrooter.static nschrooter.c `pkg-config --static --libs libseccomp`
+	strip nschrooter.static
 
 pidsearch: pidsearch.c
-	gcc -Os -Wall -o pidsearch pidsearch.c
+	$(CC) $(CFLAGS) -o pidsearch pidsearch.c
 
 nssu: nssu.c
-	gcc -Os -Wall -o nssu nssu.c
+	$(CC) $(CFLAGS) -o nssu nssu.c
 
 clean:
-	rm -f nschrooter pidsearch nssu
+	rm -f nschrooter nschrooter.static pidsearch nssu
