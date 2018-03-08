@@ -1,6 +1,6 @@
 /* See LICENSE. */
 
-#define USE_LIBSECCOMP
+//#define USE_LIBSECCOMP
 
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -541,7 +541,7 @@ int main(int argc, char **argv) {
 
 	if (automounts) { /* for /proc, since needs to be in new pid ns. */
 		(void) mkdir("proc", 0755);
-		if (mount("proc", "/proc", "proc", 0, NULL) != 0)
+		if (mount("proc", "/proc", "proc", MS_NOEXEC|MS_NOSUID|MS_NODEV, NULL) != 0)
 			perror("mount /proc");
 
 	}
