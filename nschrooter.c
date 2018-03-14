@@ -1,7 +1,5 @@
 /* See LICENSE. */
 
-//#define USE_LIBSECCOMP
-
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,14 +17,6 @@
 #include <stdint.h>
 #include <dirent.h>
 
-#ifdef USE_LIBSECCOMP
-#include <seccomp.h>
-#define SC_PARMS "S"
-#else
-#define SC_PARMS ""
-#endif
-
-
 static void perror_msg_and_die2(const char* msg, const char *extra) {
 	if (extra) fprintf(stderr,"%s: ", extra);
 	perror(msg);
@@ -42,7 +32,6 @@ static void error_msg_and_die(const char* msg) {
 	exit(1);
 }
 
-
 static int pwritef(const char * fn, const char *buf, int flags) {
         int fd = open(fn, O_WRONLY | flags, 0600);
         if (fd < 0) return -1;
@@ -51,7 +40,6 @@ static int pwritef(const char * fn, const char *buf, int flags) {
         close(fd);
         return 0;
 }
-
 
 static void procwritef(const char * fn, const char *msg, ...) {
 	char buf[80];
@@ -85,68 +73,8 @@ static char* strdcat(const char *a, const char *b) {
 	return c;
 }
 
-#ifdef USE_LIBSECCOMP
-static int do_sc_filter = 0;
-static void apply_seccomp(void) {
-	if (!do_sc_filter) return;
-	int r = 0;
-	scmp_filter_ctx c = seccomp_init(SCMP_ACT_ALLOW);
-	if (!c) error_msg_and_die("seccomp_init failed");
-
-	/* chown */
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(chown), 0)) < 0) goto err_r;
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(chown32), 0)) < 0) goto err_r;
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(fchown), 0)) < 0) goto err_r;
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(fchown32), 0)) < 0) goto err_r;
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(fchownat), 0)) < 0) goto err_r;
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(lchown), 0)) < 0) goto err_r;
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(lchown32), 0)) < 0) goto err_r;
-
-	/* set*id, etc. Change of groups or user/fs/etc ids... */
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setfsgid), 0)) < 0) goto err_r;
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setfsgid32), 0)) < 0) goto err_r;
-
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setfsuid), 0)) < 0) goto err_r;
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setfsuid32), 0)) < 0) goto err_r;
-
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setgid), 0)) < 0) goto err_r;
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setgid32), 0)) < 0) goto err_r;
-
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setgroups), 0)) < 0) goto err_r;
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setgroups32), 0)) < 0) goto err_r;
-
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setregid), 0)) < 0) goto err_r;
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setregid32), 0)) < 0) goto err_r;
-
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setresgid), 0)) < 0) goto err_r;
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setresgid32), 0)) < 0) goto err_r;
-
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setresuid), 0)) < 0) goto err_r;
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setresuid32), 0)) < 0) goto err_r;
-
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setreuid), 0)) < 0) goto err_r;
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setreuid32), 0)) < 0) goto err_r;
-
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setuid), 0)) < 0) goto err_r;
-	if ((r = seccomp_rule_add(c, SCMP_ACT_ERRNO(0), SCMP_SYS(setuid32), 0)) < 0) goto err_r;
-
-	if ((r = seccomp_load(c)) < 0) goto err_r;
-
-	seccomp_release(c);
-	return;
-
-err_r:
-	errno = -r;
-	perror_msg_and_die("seccomp");
-}
-#else
-static void apply_seccomp(void) { }
-#endif
-
-
 static int clean_env = 0;
 static void run_prog(char **argv) {
-	apply_seccomp();
 	if (clean_env) {
 		/* We make a new environment just to be nice (and to add *sbin). */
 		char *termp = getenv("TERM");
@@ -208,7 +136,6 @@ static void ns_enter(int pid, char **argv) {
 	/* Here we gooooo... */
 	run_prog(argv);
 }
-
 
 static int proc_list_pids(DIR **proc) {
 	if (!(*proc)) {
@@ -322,9 +249,6 @@ void usage(char *name) {
 		"\n\t-M hn\tSet hostname (default=directory name)"
 		"\n\t-r path\tMount old root at path (default if user=oldroot,if root none)"
 		"\n\t-t sec\tExit timeout in an empty namespace (default 5, -1 = forever)"
-#ifdef USE_LIBSECCOMP
-		"\n\t-S\tFilter syscalls to ignore impossible things (chown,setuid,etc) (only user)"
-#endif
 	"\n\n",name);
 	exit(1);
 }
@@ -341,7 +265,7 @@ int main(int argc, char **argv) {
 	int muid = getuid();
 	int mgid = getgid();
 
-	while ((opt = getopt(argc, argv, "+ibkEANcM:r:t:" SC_PARMS)) != -1) {
+	while ((opt = getopt(argc, argv, "+ibkEANcM:r:t:")) != -1) {
 		switch (opt) {
 			default: usage(argv[0]); break;
 			case 'i': initmode = 1; break; /* -i = nschrooter provides ns pid 1 (Init) */
@@ -354,9 +278,6 @@ int main(int argc, char **argv) {
 			case 'M': hn = optarg; break; /* Setting hostname with the -M flag */
 			case 'r': old_root = optarg; break; /* Path to old root */
 			case 't': init_timeout = atoi(optarg); break; /* Timeout for exiting as init in an empty ns. */
-#ifdef USE_LIBSECCOMP
-			case 'S': if (muid) do_sc_filter = 1; break;
-#endif
 		}
 	}
 
