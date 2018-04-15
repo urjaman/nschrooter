@@ -359,7 +359,7 @@ int main(int argc, char **argv) {
 	}
 
 	/* slave mount */
-	if (mount(NULL, "/", NULL, MS_REC|MS_PRIVATE, NULL) != 0)
+	if (mount(NULL, "/", NULL, MS_REC|MS_SLAVE, NULL) != 0)
 		perror_msg_and_die("slave mount");
 
 	/* Bind mount the whole thing. */
