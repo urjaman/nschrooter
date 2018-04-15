@@ -245,6 +245,7 @@ void usage(char *name) {
 		"\n\t-E\tEnter previous namespace (dont make new ns)"
 		"\n\t-A\tMount/Provide /proc,/dev and /sys for you (default if user)"
 		"\n\t-N\tDont mount /proc,/dev,/sys (default if root)"
+		"\n\t-T\tMount tmpfs at /tmp"
 		"\n\t-c\tCleanup environment (only passes TERM and a clean PATH)"
 		"\n\t-M hn\tSet hostname (default=directory name)"
 		"\n\t-r path\tMount old root at path (default if user=oldroot,if root none)"
@@ -257,6 +258,7 @@ int main(int argc, char **argv) {
 	int entermode = 2; /* 0= Force new ns, 1= Force enter old ns, 2= automatic (enter old if exists) */
 	int initmode = 2; /* 0= the program is init, 1= we become init, 2= automatic (0 if prog ends /init)  */
 	int automounts = 2; /* 0= no helpful mounts, 1= do helpful mounts, 2= automatic (only if user) */
+	int do_tmpfs = 0;
 	char *hn = NULL; /* Hostname */
 	char *old_root = NULL;
 	int opt;
@@ -265,7 +267,7 @@ int main(int argc, char **argv) {
 	int muid = getuid();
 	int mgid = getgid();
 
-	while ((opt = getopt(argc, argv, "+ibkEANcM:r:t:")) != -1) {
+	while ((opt = getopt(argc, argv, "+ibkEANTcM:r:t:")) != -1) {
 		switch (opt) {
 			default: usage(argv[0]); break;
 			case 'i': initmode = 1; break; /* -i = nschrooter provides ns pid 1 (Init) */
@@ -274,6 +276,7 @@ int main(int argc, char **argv) {
 			case 'E': entermode = 1; break; /* Enter old namespaces, dont try making new. */
 			case 'A': automounts = 1; break; /* Help with /proc,/sys,/dev */
 			case 'N': automounts = 0; break; /* No help with ^^ */
+			case 'T': do_tmpfs = 1; break; /* Do a tmpfs mount at /tmp */
 			case 'c': clean_env = 1; break; /* Cleanup environment */
 			case 'M': hn = optarg; break; /* Setting hostname with the -M flag */
 			case 'r': old_root = optarg; break; /* Path to old root */
@@ -465,6 +468,12 @@ int main(int argc, char **argv) {
 		if (mount("proc", "/proc", "proc", MS_NOEXEC|MS_NOSUID|MS_NODEV, NULL) != 0)
 			perror("mount /proc");
 
+	}
+
+	if (do_tmpfs) {
+		(void) mkdir("tmp", 01777);
+		if (mount("tmpfs", "/tmp", "tmpfs", MS_NOEXEC|MS_NOSUID|MS_NODEV, NULL) != 0)
+			perror("mount /tmp");
 	}
 
 	if (sethostname(hn, strlen(hn)) != 0)
