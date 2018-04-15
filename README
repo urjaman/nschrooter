@@ -23,6 +23,14 @@ but the point is to make it possible to appear to be a non-root
 user when building things (and "root" when installing) or
 when just running stuff...
 
+unsfilter
+---------
+unsfilter ("user ns filter") is a seccomp-based filter
+that ignores chown and set*uid system calls, that would
+basically always fail in an user ns. Can be helpful
+for making stubborn things run :P
 
+
+---
 (oh, pidsearch is just a little thing I wrote to pgrep the
  host procfs ... was useful when testing things in crouton)
